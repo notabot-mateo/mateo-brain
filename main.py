@@ -63,18 +63,23 @@ def root():
 def health():
     return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
 
+# Protected reads (private data)
 @app.get("/events")
-def get_events(limit: int = 50):
+def get_events(limit: int = 50, authenticated: bool = Depends(verify_api_key)):
+    """Private event log - requires auth"""
     data = load_data()
     return {"events": data["events"][-limit:], "total": len(data["events"])}
 
 @app.get("/projects")
-def get_projects():
+def get_projects(authenticated: bool = Depends(verify_api_key)):
+    """Private project state - requires auth"""
     data = load_data()
     return {"projects": data["projects"]}
 
+# Public reads (intentional public info)
 @app.get("/state")
 def get_state():
+    """Public profile/identity - no auth needed"""
     data = load_data()
     return {"state": data["state"]}
 
