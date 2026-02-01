@@ -32,7 +32,7 @@ def load_data():
                 return json.load(f)
     except:
         pass
-    return {"events": [], "projects": {}, "state": {}}
+    return {"events": [], "projects": {}, "state": {}, "cache": {}}
 
 def save_data(data):
     os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
@@ -50,6 +50,12 @@ class ProjectState(BaseModel):
     description: str = ""
     last_updated: str = None
 
+class CachedContent(BaseModel):
+    url: str
+    title: str = ""
+    content: str
+    source: str = ""  # e.g., "substack", "news", "youtube"
+
 # Public endpoints (no auth)
 @app.get("/")
 def root():
@@ -57,7 +63,7 @@ def root():
         "service": "mateo-brain",
         "status": "alive",
         "message": "Hello! I'm Mateo's persistent memory service.",
-        "endpoints": ["/events", "/projects", "/state", "/health"],
+        "endpoints": ["/events", "/projects", "/state", "/cache", "/health"],
         "auth": "X-API-Key header required for write operations" if API_KEY else "no auth configured"
     }
 
@@ -120,6 +126,64 @@ def set_state(key: str, value: dict, authenticated: bool = Depends(verify_api_ke
     }
     save_data(data)
     return {"status": "set", "key": key}
+
+# Content cache endpoints
+@app.post("/cache")
+def cache_content(item: CachedContent, authenticated: bool = Depends(verify_api_key)):
+    """Cache fetched content for later retrieval"""
+    data = load_data()
+    if "cache" not in data:
+        data["cache"] = {}
+    
+    # Use URL as key (normalized)
+    key = item.url.lower().strip()
+    data["cache"][key] = {
+        "url": item.url,
+        "title": item.title,
+        "content": item.content,
+        "source": item.source,
+        "cached_at": datetime.utcnow().isoformat(),
+        "accessed_count": 0
+    }
+    save_data(data)
+    return {"status": "cached", "url": item.url, "title": item.title}
+
+@app.get("/cache")
+def get_cache(q: str = None, limit: int = 20, authenticated: bool = Depends(verify_api_key)):
+    """Search cached content by URL or text"""
+    data = load_data()
+    cache = data.get("cache", {})
+    
+    if not q:
+        # Return recent cached items (by cached_at)
+        items = sorted(cache.values(), key=lambda x: x.get("cached_at", ""), reverse=True)[:limit]
+        return {"items": [{"url": i["url"], "title": i["title"], "source": i["source"], "cached_at": i["cached_at"]} for i in items], "total": len(cache)}
+    
+    # Search by URL or content
+    q_lower = q.lower()
+    matches = []
+    for key, item in cache.items():
+        if q_lower in key or q_lower in item.get("title", "").lower() or q_lower in item.get("content", "").lower():
+            matches.append(item)
+    
+    return {"items": [{"url": i["url"], "title": i["title"], "source": i["source"], "cached_at": i["cached_at"]} for i in matches[:limit]], "total": len(matches)}
+
+@app.get("/cache/url")
+def get_cached_url(url: str, authenticated: bool = Depends(verify_api_key)):
+    """Get cached content for a specific URL"""
+    data = load_data()
+    cache = data.get("cache", {})
+    key = url.lower().strip()
+    
+    if key not in cache:
+        raise HTTPException(status_code=404, detail="URL not cached")
+    
+    # Update access count
+    cache[key]["accessed_count"] = cache[key].get("accessed_count", 0) + 1
+    cache[key]["last_accessed"] = datetime.utcnow().isoformat()
+    save_data(data)
+    
+    return cache[key]
 
 # Webhook secrets (per source)
 GITHUB_WEBHOOK_SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
