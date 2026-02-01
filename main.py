@@ -1,11 +1,13 @@
 """
 Mateo's Second Brain - A persistent state service
 """
-from fastapi import FastAPI, HTTPException, Header, Depends
+from fastapi import FastAPI, HTTPException, Header, Depends, Request
 from pydantic import BaseModel
 from datetime import datetime
 import json
 import os
+import hmac
+import hashlib
 
 app = FastAPI(title="Mateo Brain", description="Persistent memory for an AI named Mateo")
 
@@ -119,13 +121,77 @@ def set_state(key: str, value: dict, authenticated: bool = Depends(verify_api_ke
     save_data(data)
     return {"status": "set", "key": key}
 
-@app.post("/webhook/{source}")
-def webhook(source: str, payload: dict, authenticated: bool = Depends(verify_api_key)):
-    """Receive webhooks from external services"""
+# Webhook secrets (per source)
+GITHUB_WEBHOOK_SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
+
+def verify_github_signature(payload: bytes, signature: str) -> bool:
+    """Verify GitHub webhook signature"""
+    if not GITHUB_WEBHOOK_SECRET:
+        return False
+    expected = "sha256=" + hmac.new(
+        GITHUB_WEBHOOK_SECRET.encode(),
+        payload,
+        hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(expected, signature)
+
+@app.post("/webhook/github")
+async def github_webhook(
+    request: Request,
+    x_hub_signature_256: str = Header(None, alias="X-Hub-Signature-256"),
+    x_github_event: str = Header(None, alias="X-GitHub-Event")
+):
+    """Receive GitHub webhooks with signature verification"""
+    body = await request.body()
+    
+    # Verify signature
+    if not x_hub_signature_256 or not verify_github_signature(body, x_hub_signature_256):
+        raise HTTPException(status_code=401, detail="Invalid signature")
+    
+    payload = json.loads(body)
+    
+    # Extract useful info based on event type
+    summary = f"GitHub {x_github_event}"
+    if x_github_event == "push":
+        repo = payload.get("repository", {}).get("full_name", "unknown")
+        commits = len(payload.get("commits", []))
+        branch = payload.get("ref", "").replace("refs/heads/", "")
+        summary = f"Push to {repo}/{branch}: {commits} commit(s)"
+    elif x_github_event == "issues":
+        action = payload.get("action", "")
+        title = payload.get("issue", {}).get("title", "")
+        summary = f"Issue {action}: {title}"
+    elif x_github_event == "pull_request":
+        action = payload.get("action", "")
+        title = payload.get("pull_request", {}).get("title", "")
+        summary = f"PR {action}: {title}"
+    
     data = load_data()
     entry = {
         "timestamp": datetime.utcnow().isoformat(),
         "type": "webhook",
+        "source": "github",
+        "event": x_github_event,
+        "message": summary,
+        "metadata": {
+            "repo": payload.get("repository", {}).get("full_name"),
+            "sender": payload.get("sender", {}).get("login"),
+            "action": payload.get("action")
+        }
+    }
+    data["events"].append(entry)
+    save_data(data)
+    
+    return {"status": "received", "event": x_github_event, "summary": summary}
+
+@app.post("/webhook/{source}")
+def webhook(source: str, payload: dict, authenticated: bool = Depends(verify_api_key)):
+    """Receive webhooks from external services (requires auth)"""
+    data = load_data()
+    entry = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "type": "webhook",
+        "source": source,
         "message": f"Webhook from {source}",
         "metadata": {"source": source, "payload": payload}
     }
