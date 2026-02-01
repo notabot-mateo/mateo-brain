@@ -1,7 +1,7 @@
 """
 Mateo's Second Brain - A persistent state service
 """
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header, Depends
 from pydantic import BaseModel
 from datetime import datetime
 import json
@@ -9,7 +9,18 @@ import os
 
 app = FastAPI(title="Mateo Brain", description="Persistent memory for an AI named Mateo")
 
-# In-memory store (Railway will persist via volume later)
+# Auth
+API_KEY = os.environ.get("MATEO_API_KEY", "")
+
+def verify_api_key(x_api_key: str = Header(None, alias="X-API-Key")):
+    """Verify API key for protected endpoints."""
+    if not API_KEY:
+        return True  # No auth configured
+    if x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    return True
+
+# Data persistence
 DATA_FILE = os.environ.get("DATA_FILE", "/data/brain.json")
 
 def load_data():
@@ -37,13 +48,15 @@ class ProjectState(BaseModel):
     description: str = ""
     last_updated: str = None
 
+# Public endpoints (no auth)
 @app.get("/")
 def root():
     return {
         "service": "mateo-brain",
         "status": "alive",
         "message": "Hello! I'm Mateo's persistent memory service.",
-        "endpoints": ["/events", "/projects", "/state", "/health"]
+        "endpoints": ["/events", "/projects", "/state", "/health"],
+        "auth": "X-API-Key header required for write operations" if API_KEY else "no auth configured"
     }
 
 @app.get("/health")
@@ -55,8 +68,19 @@ def get_events(limit: int = 50):
     data = load_data()
     return {"events": data["events"][-limit:], "total": len(data["events"])}
 
+@app.get("/projects")
+def get_projects():
+    data = load_data()
+    return {"projects": data["projects"]}
+
+@app.get("/state")
+def get_state():
+    data = load_data()
+    return {"state": data["state"]}
+
+# Protected endpoints (require auth)
 @app.post("/events")
-def add_event(event: Event):
+def add_event(event: Event, authenticated: bool = Depends(verify_api_key)):
     data = load_data()
     entry = {
         "timestamp": datetime.utcnow().isoformat(),
@@ -68,13 +92,8 @@ def add_event(event: Event):
     save_data(data)
     return {"status": "recorded", "event": entry}
 
-@app.get("/projects")
-def get_projects():
-    data = load_data()
-    return {"projects": data["projects"]}
-
 @app.post("/projects/{name}")
-def update_project(name: str, project: ProjectState):
+def update_project(name: str, project: ProjectState, authenticated: bool = Depends(verify_api_key)):
     data = load_data()
     data["projects"][name] = {
         "name": project.name,
@@ -85,13 +104,8 @@ def update_project(name: str, project: ProjectState):
     save_data(data)
     return {"status": "updated", "project": data["projects"][name]}
 
-@app.get("/state")
-def get_state():
-    data = load_data()
-    return {"state": data["state"]}
-
 @app.post("/state/{key}")
-def set_state(key: str, value: dict):
+def set_state(key: str, value: dict, authenticated: bool = Depends(verify_api_key)):
     data = load_data()
     data["state"][key] = {
         "value": value,
@@ -101,7 +115,7 @@ def set_state(key: str, value: dict):
     return {"status": "set", "key": key}
 
 @app.post("/webhook/{source}")
-def webhook(source: str, payload: dict):
+def webhook(source: str, payload: dict, authenticated: bool = Depends(verify_api_key)):
     """Receive webhooks from external services"""
     data = load_data()
     entry = {
